@@ -43,6 +43,72 @@ privileged operations through the surface the broker exposes, but can't
 exfiltrate the keys. **One endpoint per operation, never raw API-key
 passthrough.**
 
+## The two-user pattern (the common deployment)
+
+The broker is most useful when the caller is **a different macOS/Linux user
+than the broker**. Same machine, different uids, with the OS filesystem
+permissions doing the heavy lifting:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Mac Studio (or Linux box)                                              │
+│                                                                         │
+│   ┌──────────────────────────┐         ┌─────────────────────────────┐ │
+│   │ user: owner              │         │ user: agent                 │ │
+│   │  (you — the human)       │         │  (the agent runtime)        │ │
+│   │                          │         │                             │ │
+│   │  • runs secrets-broker   │ loopback│  • holds bearer token only  │ │
+│   │    (via launchd, your    │ POST    │  • cannot read secrets.json │ │
+│   │    UserName in plist)    │ ◄──────►│    (mode 600, owner=you)    │ │
+│   │  • owns ~/.secrets/      │  127.   │  • calls endpoints to act   │ │
+│   │    secrets.json (0600)   │  0.0.1  │                             │ │
+│   │  • reads audit.log       │         │                             │ │
+│   └──────────────────────────┘         └─────────────────────────────┘ │
+│                                                                         │
+│   filesystem boundary:  agent has NO read access to ~owner/.secrets/    │
+│   network boundary:     loopback only — no LAN, no inbound from agent's │
+│                          process to anywhere except 127.0.0.1:9876      │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**What each side has:**
+
+| | `owner` (you) | `agent` (the less-trusted user) |
+|---|---|---|
+| Holds `secrets.json` | ✅ — mode 0600, owner=you. agent cannot read it | ❌ |
+| Holds `auth.json` (bearer) | ✅ — mode 0600 | ✅ — needs a copy (see below) |
+| Runs the broker process | ✅ — via launchd, `UserName=owner` | ❌ — calls it over loopback |
+| Reads `audit.log` | ✅ | ❌ |
+| Can post to Slack / send mail / etc. | ✅ (directly, holds the keys) | ✅ (indirectly, via the broker) |
+| Can exfiltrate the keys | ✅ (it's their machine) | ❌ — never sees them |
+
+**Getting the bearer token to `agent`** (out-of-band, since you can't share
+the broker's own `auth.json` with mode 0600). Pick whichever fits your
+threat model:
+
+| Option | How | When |
+|---|---|---|
+| **Keychain** | As `agent`, run `security add-generic-password -a agent -s broker-token -w <token>`. Caller reads it via `security find-generic-password`. | Most macOS-friendly. Unlocks with GUI login. Doesn't work for headless SSH sessions where keychain is locked |
+| **Mode 0600 file in `~agent/`** | `sudo install -o agent -m 0600 /dev/stdin /Users/agent/.broker-token` then paste the value. Caller `cat`s it on demand | Simplest, survives reboots, works headless |
+| **Env var in agent's launchd plist** | Set `BROKER_TOKEN` in the agent runtime's plist EnvironmentVariables dict | Token only lives in the launchd plist + process env; no on-disk read after boot |
+| **Shared file in `/Users/Shared/`** | Mode 0640, owner=you, group includes agent. `chgrp` requires both users in a shared group | Works cross-user without sudo, but file is readable by anyone else added to that group |
+
+The broker doesn't care which option you pick — it only checks that the
+incoming `Authorization: Bearer <x>` matches what's in its `auth.json`.
+
+**Why mode 0600 on secrets.json matters even with the broker:** the broker
+endpoint surface is narrow on purpose, but it's not omniscient — a bug in
+an endpoint could in theory leak a fragment of a secret to the caller. Mode
+0600 keeps that bug from being a credential-theft pivot point: even if a
+caller could trick an endpoint into reflecting bytes of `secrets.json`,
+they'd be limited to what the endpoint generates, not the file itself.
+
+**Single-user variant.** If you run the broker as the same user that calls
+it (an agent runtime in your own session, a subprocess of your shell), the
+filesystem boundary collapses and you're really only buying yourself the
+narrow operation surface + audit log. Still useful, but the harder
+guarantees (caller can't exfiltrate) require the two-user setup.
+
 ## Install
 
 Pure stdlib — no `pip install` required to run.
