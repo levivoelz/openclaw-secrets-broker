@@ -1,0 +1,23 @@
+# Live state — NEVER commit
+auth.json
+secrets.json
+audit.log
+*.log
+daemon.out
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OMC session cache (per-machine, not portable)
+.omc/

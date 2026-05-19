@@ -1,0 +1,4 @@
+{
+  "_comment": "Generate with: openssl rand -hex 32. Mode MUST be 0600. Share the bearer_token value out-of-band with each authorized caller (their keychain, env var, etc.). Never commit.",
+  "bearer_token": "REPLACE_WITH_64_HEX_CHARS_FROM_openssl_rand_hex_32"
+}
