@@ -1,9 +1,13 @@
-# secrets-daemon
+# openclaw-secrets-daemon
 
 A localhost HTTP broker that performs credentialed API operations on behalf
 of a less-trusted caller — another user account on the same machine, an
 agent runtime, a sandboxed subprocess — **without ever handing the caller
 the underlying credentials.**
+
+Built to back the [openclaw](https://github.com/openclaw/openclaw) ecosystem,
+but the code itself is generic — endpoint shape and process identity
+(`secrets-daemon/1`) don't assume OpenClaw. Reuse for any similar setup.
 
 The caller hits an operation endpoint (`/slack/post`, `/anthropic/complete`,
 etc.) with a bearer token. The daemon resolves the right API key from its
@@ -46,7 +50,7 @@ raw API-key passthrough.**
 
 ```bash
 # 1. Clone wherever you want it
-git clone https://github.com/<you>/secrets-daemon.git ~/.secrets-daemon
+git clone https://github.com/levivoelz/openclaw-secrets-daemon.git ~/.secrets-daemon
 cd ~/.secrets-daemon
 
 # 2. Create the secrets file (NOT in this repo, separate dir)
