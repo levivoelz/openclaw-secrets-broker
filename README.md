@@ -1,4 +1,4 @@
-# openclaw-secrets-daemon
+# openclaw-secrets-broker
 
 A localhost HTTP broker that performs credentialed API operations on behalf
 of a less-trusted caller — another user account on the same machine, an
@@ -6,27 +6,17 @@ agent runtime, a sandboxed subprocess — **without ever handing the caller
 the underlying credentials.**
 
 Built to back the [openclaw](https://github.com/openclaw/openclaw) ecosystem,
-but the code itself is generic — endpoint shape and process identity
-(`secrets-daemon/1`) don't assume OpenClaw. Reuse for any similar setup.
+but the code is generic — endpoint shape and process identity
+(`secrets-broker/1`) don't assume OpenClaw. Reuse for any similar setup.
 
 The caller hits an operation endpoint (`/slack/post`, `/anthropic/complete`,
-etc.) with a bearer token. The daemon resolves the right API key from its
+etc.) with a bearer token. The broker resolves the right API key from its
 own secrets file, calls upstream, returns the result. The API key never
-leaves the daemon's address space.
-
-## Why
-
-Common pattern: you want an agent (or a teammate's user account, or some
-sandboxed process) to be able to *use* an API key — post to Slack, send
-mail, hit OpenAI — but you don't want to give them the raw key. Once a key
-is in their hands, it's everywhere they go: keychain, env vars, scrollback,
-process memory, dumped to logs by some helpful library.
-
-This daemon flips the model:
+leaves the broker's address space.
 
 ```
        ┌─────────────────┐                          ┌──────────────────┐
-       │  caller         │   HTTP POST + bearer     │  secrets-daemon  │
+       │  caller         │   HTTP POST + bearer     │  secrets-broker  │
        │  (agent/user/   │ ───────────────────────► │  (your user)     │
        │  subprocess)    │   /slack/post {channel,  │                  │
        │                 │     text: "..."}         │  • reads key     │
@@ -42,48 +32,62 @@ This daemon flips the model:
                                               └─────────────────────────┘
 ```
 
-The caller can perform privileged operations through the surface the daemon
-exposes, but can't exfiltrate the keys. **One endpoint per operation, not
-raw API-key passthrough.**
+## Why
+
+You want an agent (or a teammate's user account, or some sandboxed process)
+to be able to *use* an API key — post to Slack, send mail, hit OpenAI — but
+not to *hold* one. Once a key is in their hands, it's everywhere they go:
+keychain, env vars, scrollback, process memory, dumped to logs by some
+helpful library. This broker flips the model: the caller can perform
+privileged operations through the surface the broker exposes, but can't
+exfiltrate the keys. **One endpoint per operation, never raw API-key
+passthrough.**
 
 ## Install
 
-```bash
-# 1. Clone wherever you want it
-git clone https://github.com/levivoelz/openclaw-secrets-daemon.git ~/.secrets-daemon
-cd ~/.secrets-daemon
+Pure stdlib — no `pip install` required to run.
 
-# 2. Create the secrets file (NOT in this repo, separate dir)
+```bash
+git clone https://github.com/levivoelz/openclaw-secrets-broker.git ~/.secrets-broker
+cd ~/.secrets-broker
+
+# 1. Create the secrets file (NOT in this repo, separate dir)
 mkdir -p ~/.secrets && chmod 700 ~/.secrets
 cp examples/secrets.json.example ~/.secrets/secrets.json
 chmod 600 ~/.secrets/secrets.json
 # ...edit ~/.secrets/secrets.json with real credentials...
 
-# 3. Generate the bearer token
+# 2. Generate the bearer token
 ( umask 077 ; jq -n --arg t "$(openssl rand -hex 32)" '{bearer_token:$t}' \
   > auth.json )
 chmod 600 auth.json
 
-# 4. Share the bearer token with each authorized caller out-of-band
+# 3. Share the bearer token with each authorized caller out-of-band
 #    (their keychain, env var, separate file with strict mode).
 
-# 5. Run it manually first to confirm it boots
-python3 server.py
-# → "secrets-daemon listening on 127.0.0.1:9876"
+# 4. Run it manually first to confirm it boots
+PYTHONPATH=src python3 -m secrets_broker
+# → "secrets-broker listening on 127.0.0.1:9876"
+```
+
+For a proper install path (`secrets-broker` on PATH, no `PYTHONPATH` needed):
+
+```bash
+pip install -e .
+secrets-broker
 ```
 
 ### Run under launchd (macOS, KeepAlive)
 
 ```bash
-# Render the template
 sed -e "s|__USER__|$(whoami)|g" \
-    -e "s|__BASE__|$HOME/.secrets-daemon|g" \
-    -e "s|__LABEL__|com.example.secrets-daemon|g" \
-    examples/com.example.secrets-daemon.plist.template \
-    > /tmp/com.example.secrets-daemon.plist
+    -e "s|__BASE__|$HOME/.secrets-broker|g" \
+    -e "s|__LABEL__|com.example.secrets-broker|g" \
+    examples/com.example.secrets-broker.plist.template \
+    > /tmp/com.example.secrets-broker.plist
 
-sudo cp /tmp/com.example.secrets-daemon.plist /Library/LaunchDaemons/
-sudo launchctl load /Library/LaunchDaemons/com.example.secrets-daemon.plist
+sudo cp /tmp/com.example.secrets-broker.plist /Library/LaunchDaemons/
+sudo launchctl load /Library/LaunchDaemons/com.example.secrets-broker.plist
 ```
 
 Pick your own reverse-DNS label — anything unique on the system that matches
@@ -92,54 +96,55 @@ the plist filename.
 ## Configuration
 
 All paths and the listen port are env-overridable. Defaults assume
-single-user use on macOS / Linux:
+single-user use on macOS / Linux.
 
 | Env var | Default |
 |---|---|
-| `SECRETS_DAEMON_HOST` | `127.0.0.1` (loopback only — do not change unless you know why) |
-| `SECRETS_DAEMON_PORT` | `9876` |
-| `SECRETS_DAEMON_BASE` | `~/.secrets-daemon` |
-| `SECRETS_DAEMON_SECRETS_PATH` | `~/.secrets/secrets.json` |
-| `SECRETS_DAEMON_AUTH_PATH` | `$BASE/auth.json` |
-| `SECRETS_DAEMON_AUDIT_PATH` | `$BASE/audit.log` |
-| `SECRETS_DAEMON_USER_AGENT` | `secrets-daemon/1` (used for outbound web requests) |
+| `SECRETS_BROKER_HOST` | `127.0.0.1` (loopback only — do not change unless you know why) |
+| `SECRETS_BROKER_PORT` | `9876` |
+| `SECRETS_BROKER_BASE` | `~/.secrets-broker` |
+| `SECRETS_BROKER_SECRETS_PATH` | `~/.secrets/secrets.json` |
+| `SECRETS_BROKER_AUTH_PATH` | `$BASE/auth.json` |
+| `SECRETS_BROKER_AUDIT_PATH` | `$BASE/audit.log` |
+| `SECRETS_BROKER_USER_AGENT` | `secrets-broker/1` (sent on outbound web requests) |
 
 ## Endpoints
 
-Calling convention: all endpoints are `POST` with `Content-Type:
-application/json` and `Authorization: Bearer <token>`. Returns JSON.
+All endpoints are `POST` (except `GET /health`) with
+`Content-Type: application/json` and `Authorization: Bearer <token>`.
+Responses are JSON.
 
 | Category | Endpoint | Purpose |
 |---|---|---|
 | Health | `GET /health` | Bearer-authed; returns version + endpoint list |
-| Email (AgentMail) | `/agentmail/reply`, `/agentmail/send`, `/agentmail/verify-signature` | Reply/send via agentmail.to; verify inbound webhooks |
-| Webhook signatures | `/webhook/verify-hmac-sha256`, `/stripe/verify-signature` | Verify inbound webhook auth without leaking secrets |
-| Slack | `/slack/post`, `/slack/react`, `/slack/replies`, `/slack/history`, `/slack/conversations`, `/slack/user-info`, `/slack/upload-file` | Read + write to Slack via bot token |
-| GitHub | `/github/token` | Mint short-lived (~1h) installation-scoped GitHub App token. **This one DOES return a token** — see exception note below |
-| LLM completions | `/anthropic/complete`, `/openai/complete`, `/ollama/complete` | Forward chat completion to provider |
-| Local extraction | `/extract`, `/web/fetch-and-extract`, `/search/web` | Qwen-backed text extraction + SearXNG-backed web search synthesis. Page bodies never enter caller's context — only the extracted answer |
+| Email (AgentMail) | `/agentmail/reply`, `/agentmail/send`, `/agentmail/verify-signature` | Reply/send via agentmail.to; verify inbound Svix-signed webhooks |
+| Webhook signatures | `/webhook/verify-hmac-sha256`, `/stripe/verify-signature` | Verify inbound webhook auth without leaking the secret |
+| Slack | `/slack/post`, `/slack/react`, `/slack/replies`, `/slack/history`, `/slack/conversations`, `/slack/user-info`, `/slack/upload-file` | Read + write via bot token |
+| GitHub | `/github/token` | Mint short-lived (~1h) installation-scoped App token. **Documented exception** — see below |
+| LLM completions | `/anthropic/complete`, `/openai/complete`, `/ollama/complete` | Forward chat completions to provider |
+| Local extraction | `/extract`, `/web/fetch-and-extract`, `/search/web` | Qwen-backed extraction + SearXNG-backed web synthesis. Page bodies never enter caller's context — only the answer |
 | Google Calendar | `/calendar/list-events` | OAuth refresh handled internally |
-| Supabase | `/supabase/query` | Read-only query via service-role key |
-| Replicate | `/replicate/predict`, `/replicate/get`, `/replicate/cancel`, `/replicate/upload-file` | Predictions, file upload for file-conditioned models |
+| Supabase | `/supabase/query` | REST query via service-role key |
+| Replicate | `/replicate/predict`, `/replicate/get`, `/replicate/cancel`, `/replicate/upload-file` | Predictions + Files API uploads (for file-conditioned models) |
 | People Data Labs | `/pdl/enrich` | Person enrichment |
 | Linear | `/linear/issues/list`, `/linear/issue/create`, `/linear/issue/update`, `/linear/issue/comment`, `/linear/teams/list`, `/linear/projects/list`, `/linear/project/create`, `/linear/project/update`, `/linear/workflow-states` | Issue + project management |
 | OpenAI media | `/openai/speech`, `/openai/speech-stream`, `/openai/transcribe`, `/openai/realtime-credentials` | TTS, streaming TTS, Whisper STT, short-lived realtime session creds |
-| ElevenLabs | `/elevenlabs/tts`, `/elevenlabs/voices` | TTS + voice library |
+| ElevenLabs | `/elevenlabs/tts`, `/elevenlabs/voices` | Streaming TTS + voice library |
 
 ### The `/github/token` exception
 
 The design rule is "endpoints don't return raw secret values to the caller."
 `/github/token` is the documented exception: it returns a short-lived
 installation-scoped GitHub App token (~1h TTL) that the caller uses as a
-bearer for git operations. This trade is intentional — git tooling has no
-clean abstraction for "ask a broker to sign every operation," so we give the
-caller a scoped, expiring token instead of the App's RSA private key. If you
-add other endpoints that must return raw credentials, document them the same
-way and keep the set minimal.
+bearer for git operations. This is intentional — git tooling has no clean
+abstraction for "ask a broker to sign every operation," so the caller gets a
+scoped, expiring token instead of the App's RSA private key. Any future
+endpoints that must return raw credentials should be documented the same way
+and kept minimal.
 
 ## Adding a new secret
 
-1. Edit your secrets file (the one at `SECRETS_DAEMON_SECRETS_PATH`):
+1. Edit your secrets file (at `SECRETS_BROKER_SECRETS_PATH`):
 
    ```bash
    # Pass the value via env so it doesn't land in shell history
@@ -156,23 +161,40 @@ way and keep the set minimal.
    '
    ```
 
-2. Reload without restarting (drops in-flight requests cleanly):
+2. Reload without restarting:
 
    ```bash
-   kill -HUP $(pgrep -f secrets-daemon/server.py)
+   kill -HUP $(pgrep -f secrets_broker)
    ```
 
 ## Adding a new endpoint
 
-1. Add a `handle_<name>(body) -> (status, response_dict)` function in
-   `server.py`. Use `get_secret("<key>")` to fetch credentials. Follow the
-   existing pattern (input validation, descriptive errors, no raw secrets in
-   returns).
-2. Register it in the `ENDPOINTS` dict near the bottom of `server.py`.
-3. Restart the daemon to load the new code:
+1. Either extend an existing provider module under
+   `src/secrets_broker/endpoints/<provider>.py`, or create a new module:
+
+   ```python
+   # src/secrets_broker/endpoints/myservice.py
+   from ..secrets import get_secret
+
+   def handle_myservice_thing(body: dict) -> tuple[int, dict]:
+       """Do the thing. Body: {arg1, arg2}."""
+       api_key = get_secret("myservice-api-key")
+       # ...call upstream, return (status, response_dict)...
+       return 200, {"ok": True}
+
+   ENDPOINTS = {
+       "/myservice/thing": handle_myservice_thing,
+   }
+   ```
+
+2. Register the module in `src/secrets_broker/endpoints/__init__.py` by
+   adding it to the `modules` list inside `get_registry()`. The registry
+   asserts there are no path collisions.
+
+3. Restart the broker to load new code:
 
    ```bash
-   kill $(pgrep -f secrets-daemon/server.py)
+   kill $(pgrep -f secrets_broker)
    ```
 
    `KeepAlive=true` in the plist will respawn it. `SIGHUP` alone reloads
@@ -181,51 +203,98 @@ way and keep the set minimal.
 ## Verifying
 
 ```bash
-# Health check (bearer-authed; returns version + endpoint list)
+# Health (bearer-authed; returns version + endpoint list)
 curl -s -H "Authorization: Bearer $(jq -r .bearer_token auth.json)" \
-     http://127.0.0.1:9876/health | jq
+     -X POST http://127.0.0.1:9876/health | jq
 
 # Audit log (one JSONL line per request)
 tail -f audit.log
 ```
 
-Upstream API auth failures surface as `502 upstream_error` with the upstream
-body included, so the caller can see what went wrong without ever holding
-the credential.
+Upstream API failures surface as `502 upstream_error` with the upstream body
+included, so the caller can see what went wrong without holding the
+credential.
 
 ## Security model
 
-- **Loopback-only by default.** `HOST=127.0.0.1`. Don't bind to a routable
-  interface; this daemon is not the right shape for that. If you need cross-
-  machine access, terminate TLS + auth at a reverse proxy and proxy to
-  loopback.
+- **Loopback-only by default.** Don't bind a routable interface; this broker
+  isn't the right shape for that. For cross-machine access, put a TLS-
+  terminating reverse proxy in front of loopback.
 - **Bearer auth on every request.** Constant-time comparison; no token = no
   service.
-- **Secrets file is 0600**, owned by the user the daemon runs as. Atomic
+- **Secrets file is 0600**, owned by the user the broker runs as. Atomic
   writes only (tmpfile + `os.replace`) so partial writes can't corrupt the
   file. Reload via `SIGHUP` rather than restart so in-flight requests aren't
   dropped.
 - **One operation per endpoint** — never raw API-key passthrough. The
-  caller's surface is intentionally narrow: they can do the things the
-  daemon implements, not anything the underlying key permits.
+  caller's surface is intentionally narrow.
 - **Every request is audit-logged** to `audit.log` (JSONL, one line per
   request). Rotate periodically.
-- **The bearer token leaks → all endpoints are reachable.** Rotate the token
-  (`openssl rand -hex 32`) and redistribute if you suspect exposure.
+- **Bearer token leak → all endpoints reachable.** Rotate
+  (`openssl rand -hex 32`) and redistribute on suspected exposure.
 
 ## Repo layout
 
 ```
-server.py                Main daemon — HTTP server + endpoint handlers
+src/secrets_broker/
+  __init__.py              Package metadata, __version__
+  __main__.py              `python -m secrets_broker` entry
+  server.py                HTTP server + handler dispatch
+  config.py                Env-driven config (paths, host, port, user agent)
+  secrets.py               secrets.json + auth.json loader (+ SIGHUP reload)
+  auth.py                  Bearer-token verification
+  audit.py                 JSONL request audit log
+  http_pool.py             Keepalive HTTPS connection pool
+  utils.py                 Shared helpers (b64url, multipart boundary)
+  endpoints/
+    __init__.py            Merges per-module ENDPOINTS dicts; asserts no collisions
+    health.py
+    agentmail.py
+    webhooks.py            stripe + generic hmac-sha256
+    slack.py
+    github.py
+    completions.py         anthropic + openai + ollama
+    extract.py             /extract, /web/fetch-and-extract, /search/web
+    google_calendar.py
+    supabase.py
+    linear.py
+    pdl.py
+    replicate.py
+    speech.py              openai TTS + STT + realtime credentials
+    elevenlabs.py
+
 examples/
-  secrets.json.example                 Template for ~/.secrets/secrets.json
-  auth.json.example                    Template for bearer-token file
-  com.example.secrets-daemon.plist.template   launchd template with placeholders
+  secrets.json.example                          Template for ~/.secrets/secrets.json
+  auth.json.example                             Template for bearer-token file
+  com.example.secrets-broker.plist.template     launchd template (sed placeholders)
+
 helpers/
   setup-google-oauth.py    One-shot Google OAuth refresh-token bootstrap
-.gitignore
-LICENSE                  MIT
-README.md                You are here
+
+tests/
+  test_config.py           env-driven defaults + overrides
+  test_auth.py             bearer verification edge cases
+  test_endpoint_registry.py  every module loads, no path collisions, shape
+
+.gitignore                 Ignores live state (auth.json, secrets.json, audit.log, ...)
+pyproject.toml             Packaging + `secrets-broker` console_script + pytest config
+LICENSE                    MIT
+README.md                  You are here
+```
+
+## Dev loop
+
+```bash
+# Type / syntax check
+python3 -m compileall src/
+
+# Run tests (15 smoke tests, all stdlib, no upstream calls)
+uv run --with pytest --no-project python -m pytest tests/
+# or:
+pip install -e ".[dev]" && pytest tests/
+
+# Boot locally
+PYTHONPATH=src python3 -m secrets_broker
 ```
 
 ## License
